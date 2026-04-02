@@ -48,14 +48,24 @@ function buildUI(root) {
     </section>
 
     <div class="preview-wrap" id="preview-wrap">
-      <video id="video" playsinline controls></video>
+      <canvas id="preview-canvas" class="preview-canvas" width="1920" height="1080" hidden></canvas>
+      <video id="video" class="video-source" playsinline muted preload="metadata"></video>
       <div class="preview-placeholder">Upload, record, or pick a clip</div>
     </div>
 
     <section class="timeline-panel">
       <h2 class="panel-title">Timeline</h2>
-      <div class="timeline-scrub-row">
-        <input type="range" id="timeline-scrub" class="timeline-scrub" min="0" max="1000" value="0" step="any" disabled />
+      <p class="timeline-hint">Drag the filmstrip or playhead to scrub; movement snaps to frames. Thumbnails show the full clip.</p>
+      <div class="filmstrip-wrap" id="filmstrip-wrap" hidden>
+        <div class="filmstrip-scroll" id="filmstrip-scroll">
+          <div class="filmstrip-track" id="filmstrip-track" role="slider" aria-label="Video timeline" tabindex="0">
+            <div class="filmstrip-thumbs" id="filmstrip-thumbs"></div>
+            <div class="filmstrip-trim filmstrip-trim-in" id="filmstrip-trim-in"></div>
+            <div class="filmstrip-trim filmstrip-trim-out" id="filmstrip-trim-out"></div>
+            <div class="filmstrip-playhead" id="filmstrip-playhead"></div>
+          </div>
+        </div>
+        <div class="filmstrip-status" id="filmstrip-status"></div>
       </div>
       <div class="timeline-meta">
         <span id="timeline-frame">Frame —</span>
@@ -124,11 +134,21 @@ function buildUI(root) {
   const btnExport = $('#btn-export', root);
   const downloadLink = $('#download-link', root);
 
-  const timelineScrub = $('#timeline-scrub', root);
+  const previewCanvas = $('#preview-canvas', root);
   const fpsStepInput = $('#fps-step', root);
   const timelineFrameEl = $('#timeline-frame', root);
   const btnFramePrev = $('#btn-frame-prev', root);
   const btnFrameNext = $('#btn-frame-next', root);
+  const filmstripWrap = $('#filmstrip-wrap', root);
+  const filmstripScroll = $('#filmstrip-scroll', root);
+  const filmstripTrack = $('#filmstrip-track', root);
+  const filmstripThumbs = $('#filmstrip-thumbs', root);
+  const filmstripPlayhead = $('#filmstrip-playhead', root);
+  const filmstripTrimIn = $('#filmstrip-trim-in', root);
+  const filmstripTrimOut = $('#filmstrip-trim-out', root);
+  const filmstripStatus = $('#filmstrip-status', root);
+  /** @type {CanvasRenderingContext2D | null} */
+  const previewCtx = previewCanvas.getContext('2d');
 
   const clipListEl = $('#clip-list', root);
   const clipsEmptyEl = $('#clips-empty', root);
@@ -154,7 +174,84 @@ function buildUI(root) {
   /** @type {MediaRecorder | null} */
   let mediaRecorder = null;
   const recordedChunks = [];
-  let scrubbing = false;
+  /** filmstrip drag or keyboard scrub */
+  let timelineScrubbing = false;
+  let filmstripGen = 0;
+
+  function getEffectiveFps() {
+    const fps = Number(fpsStepInput.value);
+    return Number.isFinite(fps) && fps > 0 ? fps : 30;
+  }
+
+  function snapTimeToFrame(t) {
+    const fps = getEffectiveFps();
+    const maxIdx = Math.max(0, Math.floor(durationSec * fps - 1e-9));
+    const idx = clamp(Math.round(t * fps), 0, maxIdx);
+    return idx / fps;
+  }
+
+  function seekVideoPromise(t) {
+    return new Promise((resolve) => {
+      const target = clamp(t, 0, durationSec);
+      if (Math.abs(video.currentTime - target) < 1e-6) {
+        resolve();
+        return;
+      }
+      const onSeeked = () => {
+        video.removeEventListener('seeked', onSeeked);
+        resolve();
+      };
+      video.addEventListener('seeked', onSeeked);
+      video.currentTime = target;
+    });
+  }
+
+  function drawPreviewFromVideo() {
+    if (!previewCtx || !video.videoWidth || !video.videoHeight) return;
+    const vw = video.videoWidth;
+    const vh = video.videoHeight;
+    if (previewCanvas.width !== vw || previewCanvas.height !== vh) {
+      previewCanvas.width = vw;
+      previewCanvas.height = vh;
+    }
+    previewCtx.drawImage(video, 0, 0, vw, vh);
+    previewCanvas.hidden = false;
+  }
+
+  function updatePlayheadUI() {
+    if (!durationSec) {
+      filmstripPlayhead.style.left = '0%';
+      return;
+    }
+    const pct = (video.currentTime / durationSec) * 100;
+    filmstripPlayhead.style.left = `${clamp(pct, 0, 100)}%`;
+  }
+
+  function updateFilmstripTrimOverlays() {
+    if (!durationSec) {
+      filmstripTrimIn.style.width = '0%';
+      filmstripTrimOut.style.width = '0%';
+      return;
+    }
+    const d = durationSec;
+    const leftPct = (inSec / d) * 100;
+    const rightPct = ((d - outSec) / d) * 100;
+    filmstripTrimIn.style.width = `${leftPct}%`;
+    filmstripTrimOut.style.width = `${rightPct}%`;
+  }
+
+  function setTimelineFromClientX(clientX, snap) {
+    const rect = filmstripTrack.getBoundingClientRect();
+    if (rect.width <= 0) return;
+    const ratio = clamp((clientX - rect.left) / rect.width, 0, 1);
+    let t = ratio * durationSec;
+    if (snap) t = snapTimeToFrame(t);
+    video.currentTime = clamp(t, 0, durationSec);
+    curEl.textContent = formatTime(video.currentTime);
+    updateFrameLabel();
+    drawPreviewFromVideo();
+    updatePlayheadUI();
+  }
 
   function setStatus(text, showProgress = false) {
     const msg = document.createElement('div');
@@ -173,16 +270,71 @@ function buildUI(root) {
   }
 
   function updateFrameLabel() {
-    const fps = Number(fpsStepInput.value);
-    const f = Number.isFinite(fps) && fps > 0 ? Math.round(video.currentTime * fps) : 0;
-    timelineFrameEl.textContent = `Frame ~${f} · ${formatTime(video.currentTime)}`;
+    const fps = getEffectiveFps();
+    const f = Math.round(video.currentTime * fps);
+    timelineFrameEl.textContent = `Frame ${f} · ${formatTime(video.currentTime)}`;
   }
 
-  function syncTimelineScrubFromVideo() {
-    if (scrubbing || !durationSec) return;
-    const max = Number(timelineScrub.max) || 1000;
-    timelineScrub.value = String((video.currentTime / durationSec) * max);
+  function syncPlayheadFromVideo() {
+    if (timelineScrubbing || !durationSec) return;
     updateFrameLabel();
+    updatePlayheadUI();
+  }
+
+  async function buildFilmstrip() {
+    const gen = ++filmstripGen;
+    filmstripThumbs.replaceChildren();
+    filmstripStatus.textContent = '';
+    if (!durationSec || !previewCtx) {
+      filmstripWrap.hidden = true;
+      return;
+    }
+    filmstripWrap.hidden = false;
+    const thumbH = 56;
+    const trackW = filmstripTrack.getBoundingClientRect().width || 800;
+    const aspect = video.videoWidth && video.videoHeight ? video.videoWidth / video.videoHeight : 16 / 9;
+    const thumbW = Math.max(24, Math.round(thumbH * aspect));
+    const count = Math.max(8, Math.min(120, Math.ceil(trackW / thumbW)));
+    filmstripStatus.textContent = `Building ${count} thumbnails…`;
+
+    const times = [];
+    for (let i = 0; i < count; i++) {
+      times.push((i / Math.max(1, count - 1)) * durationSec);
+    }
+
+    const wasMuted = video.muted;
+    const wasPaused = video.paused;
+    const prevT = video.currentTime;
+    video.muted = true;
+
+    for (let i = 0; i < times.length; i++) {
+      if (gen !== filmstripGen) return;
+      await seekVideoPromise(times[i]);
+      if (gen !== filmstripGen) return;
+      drawPreviewFromVideo();
+      const c = document.createElement('canvas');
+      c.width = thumbW;
+      c.height = thumbH;
+      const ctx = c.getContext('2d');
+      if (ctx && previewCanvas.width && previewCanvas.height) {
+        ctx.drawImage(previewCanvas, 0, 0, previewCanvas.width, previewCanvas.height, 0, 0, thumbW, thumbH);
+      }
+      c.className = 'filmstrip-thumb';
+      c.dataset.time = String(times[i]);
+      filmstripThumbs.appendChild(c);
+    }
+
+    if (gen !== filmstripGen) return;
+    await seekVideoPromise(prevT);
+    if (!wasPaused) {
+      video.play().catch(() => {});
+    } else {
+      drawPreviewFromVideo();
+    }
+    video.muted = wasMuted;
+    filmstripStatus.textContent = '';
+    updatePlayheadUI();
+    updateFilmstripTrimOverlays();
   }
 
   function syncSlidersFromState() {
@@ -239,6 +391,7 @@ function buildUI(root) {
     const c = clips.find((x) => x.id === id);
     if (!c) return;
     activeClipId = id;
+    filmstripGen++;
     if (objectUrl) URL.revokeObjectURL(objectUrl);
     objectUrl = c.url;
     currentFile = c.file;
@@ -258,6 +411,7 @@ function buildUI(root) {
       if (objectUrl) URL.revokeObjectURL(objectUrl);
       objectUrl = null;
       currentFile = null;
+      filmstripGen++;
       video.removeAttribute('src');
       video.load();
       previewWrap.classList.remove('has-video');
@@ -266,7 +420,10 @@ function buildUI(root) {
       outSec = 0;
       durEl.textContent = formatTime(0);
       curEl.textContent = formatTime(0);
-      timelineScrub.disabled = true;
+      filmstripWrap.hidden = true;
+      filmstripThumbs.replaceChildren();
+      filmstripStatus.textContent = '';
+      previewCanvas.hidden = true;
       btnFramePrev.disabled = true;
       btnFrameNext.disabled = true;
       updateFrameLabel();
@@ -294,26 +451,61 @@ function buildUI(root) {
     fileInput.value = '';
   });
 
+  let previewRaf = 0;
+  function startPreviewLoop() {
+    const tick = () => {
+      previewRaf = 0;
+      if (video.paused) return;
+      drawPreviewFromVideo();
+      curEl.textContent = formatTime(video.currentTime);
+      syncPlayheadFromVideo();
+      previewRaf = requestAnimationFrame(tick);
+    };
+    if (!previewRaf) previewRaf = requestAnimationFrame(tick);
+  }
+
+  function stopPreviewLoop() {
+    if (previewRaf) {
+      cancelAnimationFrame(previewRaf);
+      previewRaf = 0;
+    }
+  }
+
+  video.addEventListener('loadeddata', () => {
+    drawPreviewFromVideo();
+  });
+
   video.addEventListener('loadedmetadata', () => {
     durationSec = video.duration || 0;
     inSec = 0;
     outSec = durationSec;
     durEl.textContent = formatTime(durationSec);
     syncSlidersFromState();
-    const max = Math.max(1000, Math.round(durationSec * 1000));
-    timelineScrub.max = String(max);
-    timelineScrub.disabled = false;
     btnFramePrev.disabled = false;
     btnFrameNext.disabled = false;
-    timelineScrub.value = '0';
     updateExportEnabled();
     updateFrameLabel();
+    updateFilmstripTrimOverlays();
+    requestAnimationFrame(() => {
+      buildFilmstrip();
+    });
+  });
+
+  video.addEventListener('play', () => {
+    startPreviewLoop();
+  });
+
+  video.addEventListener('pause', () => {
+    stopPreviewLoop();
+    drawPreviewFromVideo();
+    updateFrameLabel();
+    syncPlayheadFromVideo();
   });
 
   video.addEventListener('timeupdate', () => {
     curEl.textContent = formatTime(video.currentTime);
     readSliders();
-    syncTimelineScrubFromVideo();
+    if (!timelineScrubbing) syncPlayheadFromVideo();
     if (video.currentTime > outSec - 0.04) {
       video.pause();
       video.currentTime = outSec;
@@ -322,41 +514,74 @@ function buildUI(root) {
 
   video.addEventListener('seeked', () => {
     updateFrameLabel();
-    syncTimelineScrubFromVideo();
+    drawPreviewFromVideo();
+    if (!timelineScrubbing) syncPlayheadFromVideo();
   });
 
-  timelineScrub.addEventListener('pointerdown', () => {
-    scrubbing = true;
-    video.pause();
-  });
-  timelineScrub.addEventListener('pointerup', () => {
-    scrubbing = false;
-  });
-  timelineScrub.addEventListener('pointercancel', () => {
-    scrubbing = false;
-  });
-  timelineScrub.addEventListener('change', () => {
-    const max = Number(timelineScrub.max) || 1;
-    const t = (Number(timelineScrub.value) / max) * durationSec;
-    video.currentTime = clamp(t, 0, durationSec);
-    curEl.textContent = formatTime(video.currentTime);
-    updateFrameLabel();
-  });
-  timelineScrub.addEventListener('input', () => {
-    const max = Number(timelineScrub.max) || 1;
-    const t = (Number(timelineScrub.value) / max) * durationSec;
-    video.currentTime = clamp(t, 0, durationSec);
-    curEl.textContent = formatTime(video.currentTime);
-    updateFrameLabel();
+  function bindFilmstripPointer(el) {
+    el.addEventListener('pointerdown', (ev) => {
+      if (!durationSec) return;
+      ev.preventDefault();
+      timelineScrubbing = true;
+      video.pause();
+      el.setPointerCapture(ev.pointerId);
+      setTimelineFromClientX(ev.clientX, true);
+    });
+    el.addEventListener('pointermove', (ev) => {
+      if (!timelineScrubbing || !el.hasPointerCapture(ev.pointerId)) return;
+      setTimelineFromClientX(ev.clientX, true);
+    });
+    const end = (ev) => {
+      if (el.hasPointerCapture(ev.pointerId)) {
+        el.releasePointerCapture(ev.pointerId);
+      }
+      timelineScrubbing = false;
+    };
+    el.addEventListener('pointerup', end);
+    el.addEventListener('pointercancel', end);
+  }
+
+  bindFilmstripPointer(filmstripTrack);
+
+  filmstripTrack.addEventListener('keydown', (ev) => {
+    if (!durationSec) return;
+    const step = getStepSec();
+    if (ev.key === 'ArrowLeft' || ev.key === 'ArrowDown') {
+      ev.preventDefault();
+      video.pause();
+      video.currentTime = snapTimeToFrame(video.currentTime - step);
+      curEl.textContent = formatTime(video.currentTime);
+      updateFrameLabel();
+      drawPreviewFromVideo();
+      updatePlayheadUI();
+    } else if (ev.key === 'ArrowRight' || ev.key === 'ArrowUp') {
+      ev.preventDefault();
+      video.pause();
+      video.currentTime = snapTimeToFrame(video.currentTime + step);
+      curEl.textContent = formatTime(video.currentTime);
+      updateFrameLabel();
+      drawPreviewFromVideo();
+      updatePlayheadUI();
+    }
   });
 
-  fpsStepInput.addEventListener('change', () => updateFrameLabel());
+  let filmstripResizeTimer = 0;
+  window.addEventListener('resize', () => {
+    if (!durationSec) return;
+    clearTimeout(filmstripResizeTimer);
+    filmstripResizeTimer = window.setTimeout(() => buildFilmstrip(), 200);
+  });
+
+  fpsStepInput.addEventListener('change', () => {
+    updateFrameLabel();
+    if (durationSec) buildFilmstrip();
+  });
 
   function stepFrame(dir) {
     if (!durationSec) return;
     video.pause();
     const step = getStepSec();
-    const t = clamp(video.currentTime + dir * step, 0, durationSec);
+    const t = clamp(snapTimeToFrame(video.currentTime + dir * step), 0, durationSec);
     video.currentTime = t;
   }
 
@@ -366,11 +591,13 @@ function buildUI(root) {
   ['input', 'change'].forEach((ev) => {
     inSlider.addEventListener(ev, () => {
       readSliders();
+      updateFilmstripTrimOverlays();
       if (inSec > video.currentTime) video.currentTime = inSec;
       updateExportEnabled();
     });
     outSlider.addEventListener(ev, () => {
       readSliders();
+      updateFilmstripTrimOverlays();
       updateExportEnabled();
     });
   });
@@ -389,6 +616,7 @@ function buildUI(root) {
     inSec = t;
     if (outSec <= inSec) outSec = Math.min(durationSec, inSec + 0.1);
     syncSlidersFromState();
+    updateFilmstripTrimOverlays();
     updateExportEnabled();
   });
 
@@ -398,6 +626,7 @@ function buildUI(root) {
     outSec = t;
     if (outSec <= inSec) inSec = Math.max(0, outSec - 0.1);
     syncSlidersFromState();
+    updateFilmstripTrimOverlays();
     updateExportEnabled();
   });
 
@@ -405,6 +634,7 @@ function buildUI(root) {
     inSec = 0;
     outSec = durationSec;
     syncSlidersFromState();
+    updateFilmstripTrimOverlays();
     updateExportEnabled();
   });
 
