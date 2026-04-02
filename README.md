@@ -4,8 +4,9 @@ In-browser video editor using **ffmpeg.wasm** for encode/decode and standard bro
 
 ## Features (current)
 
-- Open a local video file
-- Preview with native controls
+- **Upload** one or more videos (multi-select); switch clips from the list
+- **Record** from webcam/mic (WebM via `MediaRecorder`); clip is added like an upload
+- **Timeline**: scrub the playhead; **Prev frame / Next frame** using a configurable **step FPS** (approximate frame stepping in the browser)
 - Trim with in/out sliders or “set in/out from playhead”
 - Export selection to **MP4** (stream copy when possible, otherwise H.264/AAC re-encode)
 
@@ -24,6 +25,22 @@ Open the URL printed by Vite (default `http://localhost:5173`). The dev server s
 npm run build
 npm run preview
 ```
+
+## Cursor: Vercel agent plugin (optional)
+
+The app does not depend on this. The [Vercel plugin for coding agents](https://vercel.com/docs/agent-resources/vercel-plugin) adds Vercel skills and slash commands in **Cursor** (and Claude Code).
+
+```bash
+npm run setup:vercel-plugin
+```
+
+That runs `npx plugins add vercel/vercel-plugin -y`. If the installer says **No supported targets** (no `claude` / `cursor` on your `PATH`), use an explicit target:
+
+```bash
+npx plugins add vercel/vercel-plugin -t cursor -s project -y
+```
+
+Restart Cursor after install.
 
 ## Deploy on Vercel
 
