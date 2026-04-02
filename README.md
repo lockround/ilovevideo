@@ -25,6 +25,22 @@ npm run build
 npm run preview
 ```
 
+## Cursor: Vercel agent plugin (optional)
+
+The app does not depend on this. The [Vercel plugin for coding agents](https://vercel.com/docs/agent-resources/vercel-plugin) adds Vercel skills and slash commands in **Cursor** (and Claude Code).
+
+```bash
+npm run setup:vercel-plugin
+```
+
+That runs `npx plugins add vercel/vercel-plugin -y`. If the installer says **No supported targets** (no `claude` / `cursor` on your `PATH`), use an explicit target:
+
+```bash
+npx plugins add vercel/vercel-plugin -t cursor -s project -y
+```
+
+Restart Cursor after install.
+
 ## Deploy on Vercel
 
 The repo includes `vercel.json` with **COOP** and **COEP** headers on all routes. Those headers match the dev server and are required for **ffmpeg.wasm** (and `SharedArrayBuffer`) in production.
