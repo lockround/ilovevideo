@@ -187,17 +187,95 @@ button.ghost {
   border-radius: var(--radius);
 }
 
-.timeline-scrub-row {
-  margin-bottom: 0.5rem;
+.timeline-hint {
+  margin: 0 0 0.65rem;
+  font-size: 0.8rem;
+  color: var(--muted);
+  line-height: 1.35;
 }
 
-.timeline-scrub {
+.filmstrip-wrap {
+  margin-bottom: 0.65rem;
+}
+
+.filmstrip-scroll {
+  overflow-x: auto;
+  overflow-y: hidden;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: #0a0c10;
+}
+
+.filmstrip-track {
+  position: relative;
+  min-height: 56px;
+  min-width: 100%;
+  cursor: grab;
+  touch-action: none;
+  outline: none;
+}
+
+.filmstrip-track:focus-visible {
+  box-shadow: 0 0 0 2px var(--accent-dim);
+}
+
+.filmstrip-track:active {
+  cursor: grabbing;
+}
+
+.filmstrip-thumbs {
+  display: flex;
   width: 100%;
-  accent-color: var(--accent);
+  height: 56px;
 }
 
-.timeline-scrub:disabled {
-  opacity: 0.45;
+.filmstrip-thumb {
+  flex: 1 1 0;
+  min-width: 0;
+  height: 56px;
+  object-fit: cover;
+  display: block;
+  image-rendering: auto;
+  pointer-events: none;
+  user-select: none;
+}
+
+.filmstrip-trim {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.55);
+  pointer-events: none;
+  z-index: 1;
+}
+
+.filmstrip-trim-in {
+  left: 0;
+  width: 0%;
+}
+
+.filmstrip-trim-out {
+  right: 0;
+  width: 0%;
+}
+
+.filmstrip-playhead {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  margin-left: -1px;
+  background: var(--accent);
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.5);
+  pointer-events: none;
+  z-index: 2;
+}
+
+.filmstrip-status {
+  margin-top: 0.35rem;
+  font-size: 0.75rem;
+  color: var(--muted);
+  min-height: 1.1em;
 }
 
 .timeline-meta {
@@ -288,12 +366,23 @@ button.primary:hover:not(:disabled) {
   max-height: 62vh;
 }
 
-.preview-wrap video {
+/* Hidden source element: canvas shows the frame (stable after seeks). */
+.preview-wrap .video-source {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.preview-wrap .preview-canvas {
   width: 100%;
   height: 100%;
   object-fit: contain;
   display: block;
-  vertical-align: middle;
+  background: #000;
 }
 
 .preview-placeholder {
