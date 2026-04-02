@@ -25,11 +25,22 @@ npm run build
 npm run preview
 ```
 
+## Deploy on Vercel
+
+The repo includes `vercel.json` with **COOP** and **COEP** headers on all routes. Those headers match the dev server and are required for **ffmpeg.wasm** (and `SharedArrayBuffer`) in production.
+
+1. Import the Git repository in [Vercel](https://vercel.com).
+2. Use the defaults: **Framework Preset** Vite (or “Other” with `npm run build` and output directory `dist`).
+3. Deploy.
+
+No server runtime is required; the app is static files from `dist/`.
+
 ## Project layout
 
 ```
 ├── index.html
 ├── package.json
+├── vercel.json
 ├── vite.config.js
 └── src/
     ├── main.js          # UI and wiring
