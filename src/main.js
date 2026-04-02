@@ -15,23 +15,57 @@ function clamp(n, min, max) {
   return Math.min(max, Math.max(min, n));
 }
 
+/** @typedef {{ id: string, file: File, url: string, name: string }} Clip */
+
 function buildUI(root) {
   root.innerHTML = `
     <header>
       <h1>ilovevideo</h1>
-      <p>In-browser trim and export (ffmpeg.wasm). Load a clip, set in/out, export MP4.</p>
+      <p>Capture, upload, trim, and export (ffmpeg.wasm). Frame-by-frame on the timeline.</p>
     </header>
 
     <div class="toolbar">
-      <label class="file-label">Open video<input id="file" type="file" accept="video/*" /></label>
+      <label class="file-label">Upload video<input id="file" type="file" accept="video/*" multiple /></label>
+      <button type="button" id="btn-camera-toggle" title="Record from webcam">Record camera</button>
       <button type="button" id="btn-load-ffmpeg" title="Download ffmpeg core (~31 MB)">Load ffmpeg</button>
       <span id="ffmpeg-state" style="font-size:0.85rem;color:var(--muted)">ffmpeg: not loaded</span>
     </div>
 
+    <div class="camera-panel hidden" id="camera-panel">
+      <video id="camera-preview" playsinline muted></video>
+      <div class="camera-actions">
+        <button type="button" id="btn-rec-start" disabled>Start recording</button>
+        <button type="button" id="btn-rec-stop" disabled>Stop &amp; add clip</button>
+        <button type="button" id="btn-camera-close" class="ghost">Close</button>
+      </div>
+      <p class="camera-hint">Allow camera access. Recording uses your browser’s default WebM codec.</p>
+    </div>
+
+    <section class="clips-panel" id="clips-panel">
+      <h2 class="panel-title">Clips</h2>
+      <ul class="clip-list" id="clip-list"></ul>
+      <p class="clips-empty" id="clips-empty">No clips yet. Upload or record.</p>
+    </section>
+
     <div class="preview-wrap" id="preview-wrap">
       <video id="video" playsinline controls></video>
-      <div class="preview-placeholder">Open a video to preview</div>
+      <div class="preview-placeholder">Upload, record, or pick a clip</div>
     </div>
+
+    <section class="timeline-panel">
+      <h2 class="panel-title">Timeline</h2>
+      <div class="timeline-scrub-row">
+        <input type="range" id="timeline-scrub" class="timeline-scrub" min="0" max="1000" value="0" step="any" disabled />
+      </div>
+      <div class="timeline-meta">
+        <span id="timeline-frame">Frame —</span>
+        <label class="fps-label">Step FPS <input type="number" id="fps-step" min="1" max="120" value="30" step="1" /></label>
+      </div>
+      <div class="frame-tools">
+        <button type="button" id="btn-frame-prev" disabled>◀ Prev frame</button>
+        <button type="button" id="btn-frame-next" disabled>Next frame ▶</button>
+      </div>
+    </section>
 
     <div class="transport">
       <button type="button" id="btn-play">Play</button>
@@ -90,6 +124,24 @@ function buildUI(root) {
   const btnExport = $('#btn-export', root);
   const downloadLink = $('#download-link', root);
 
+  const timelineScrub = $('#timeline-scrub', root);
+  const fpsStepInput = $('#fps-step', root);
+  const timelineFrameEl = $('#timeline-frame', root);
+  const btnFramePrev = $('#btn-frame-prev', root);
+  const btnFrameNext = $('#btn-frame-next', root);
+
+  const clipListEl = $('#clip-list', root);
+  const clipsEmptyEl = $('#clips-empty', root);
+  const cameraPanel = $('#camera-panel', root);
+  const btnCameraToggle = $('#btn-camera-toggle', root);
+  const cameraPreview = $('#camera-preview', root);
+  const btnRecStart = $('#btn-rec-start', root);
+  const btnRecStop = $('#btn-rec-stop', root);
+  const btnCameraClose = $('#btn-camera-close', root);
+
+  /** @type {Clip[]} */
+  let clips = [];
+  let activeClipId = '';
   let objectUrl = null;
   /** @type {File | null} */
   let currentFile = null;
@@ -97,6 +149,12 @@ function buildUI(root) {
   let inSec = 0;
   let outSec = 0;
   let ffmpegReady = false;
+  /** @type {MediaStream | null} */
+  let cameraStream = null;
+  /** @type {MediaRecorder | null} */
+  let mediaRecorder = null;
+  const recordedChunks = [];
+  let scrubbing = false;
 
   function setStatus(text, showProgress = false) {
     const msg = document.createElement('div');
@@ -106,7 +164,26 @@ function buildUI(root) {
     if (!showProgress) prog.style.width = '0%';
   }
 
-  setStatus('Ready. Open a video, then load ffmpeg to export.');
+  setStatus('Ready. Add a clip from upload or camera, then load ffmpeg to export.');
+
+  function getStepSec() {
+    const fps = Number(fpsStepInput.value);
+    if (!Number.isFinite(fps) || fps < 1) return 1 / 30;
+    return 1 / fps;
+  }
+
+  function updateFrameLabel() {
+    const fps = Number(fpsStepInput.value);
+    const f = Number.isFinite(fps) && fps > 0 ? Math.round(video.currentTime * fps) : 0;
+    timelineFrameEl.textContent = `Frame ~${f} · ${formatTime(video.currentTime)}`;
+  }
+
+  function syncTimelineScrubFromVideo() {
+    if (scrubbing || !durationSec) return;
+    const max = Number(timelineScrub.max) || 1000;
+    timelineScrub.value = String((video.currentTime / durationSec) * max);
+    updateFrameLabel();
+  }
 
   function syncSlidersFromState() {
     const d = durationSec || 1;
@@ -131,16 +208,90 @@ function buildUI(root) {
     btnExport.disabled = !ffmpegReady || !currentFile || durationSec <= 0 || outSec <= inSec;
   }
 
-  fileInput.addEventListener('change', () => {
-    const file = fileInput.files?.[0];
-    if (!file) return;
+  function updateClipsUI() {
+    clipListEl.innerHTML = '';
+    clips.forEach((c) => {
+      const li = document.createElement('li');
+      li.className = 'clip-item' + (c.id === activeClipId ? ' active' : '');
+      const name = document.createElement('span');
+      name.className = 'clip-name';
+      name.textContent = c.name;
+      const actions = document.createElement('div');
+      actions.className = 'clip-actions';
+      const sel = document.createElement('button');
+      sel.type = 'button';
+      sel.textContent = c.id === activeClipId ? 'Playing' : 'Use';
+      sel.disabled = c.id === activeClipId;
+      sel.addEventListener('click', () => selectClip(c.id));
+      const rm = document.createElement('button');
+      rm.type = 'button';
+      rm.className = 'danger-link';
+      rm.textContent = 'Remove';
+      rm.addEventListener('click', () => removeClip(c.id));
+      actions.append(sel, rm);
+      li.append(name, actions);
+      clipListEl.appendChild(li);
+    });
+    clipsEmptyEl.style.display = clips.length ? 'none' : 'block';
+  }
+
+  function selectClip(id) {
+    const c = clips.find((x) => x.id === id);
+    if (!c) return;
+    activeClipId = id;
     if (objectUrl) URL.revokeObjectURL(objectUrl);
-    objectUrl = URL.createObjectURL(file);
-    currentFile = file;
+    objectUrl = c.url;
+    currentFile = c.file;
     video.src = objectUrl;
     previewWrap.classList.add('has-video');
-    setStatus(`Loaded "${file.name}".`);
+    updateClipsUI();
     downloadLink.style.display = 'none';
+  }
+
+  function removeClip(id) {
+    const idx = clips.findIndex((x) => x.id === id);
+    if (idx === -1) return;
+    const [removed] = clips.splice(idx, 1);
+    URL.revokeObjectURL(removed.url);
+    if (activeClipId === id) {
+      activeClipId = '';
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+      objectUrl = null;
+      currentFile = null;
+      video.removeAttribute('src');
+      video.load();
+      previewWrap.classList.remove('has-video');
+      durationSec = 0;
+      inSec = 0;
+      outSec = 0;
+      durEl.textContent = formatTime(0);
+      curEl.textContent = formatTime(0);
+      timelineScrub.disabled = true;
+      btnFramePrev.disabled = true;
+      btnFrameNext.disabled = true;
+      updateFrameLabel();
+    }
+    if (clips.length && activeClipId === '') {
+      selectClip(clips[0].id);
+    }
+    updateClipsUI();
+    updateExportEnabled();
+  }
+
+  function addClipFromFile(file) {
+    const url = URL.createObjectURL(file);
+    const id = `clip-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+    const clip = { id, file, url, name: file.name };
+    clips.push(clip);
+    selectClip(id);
+    setStatus(`Added "${file.name}".`);
+  }
+
+  fileInput.addEventListener('change', () => {
+    const files = fileInput.files;
+    if (!files?.length) return;
+    for (let i = 0; i < files.length; i++) addClipFromFile(files[i]);
+    fileInput.value = '';
   });
 
   video.addEventListener('loadedmetadata', () => {
@@ -149,17 +300,68 @@ function buildUI(root) {
     outSec = durationSec;
     durEl.textContent = formatTime(durationSec);
     syncSlidersFromState();
+    const max = Math.max(1000, Math.round(durationSec * 1000));
+    timelineScrub.max = String(max);
+    timelineScrub.disabled = false;
+    btnFramePrev.disabled = false;
+    btnFrameNext.disabled = false;
+    timelineScrub.value = '0';
     updateExportEnabled();
+    updateFrameLabel();
   });
 
   video.addEventListener('timeupdate', () => {
     curEl.textContent = formatTime(video.currentTime);
     readSliders();
+    syncTimelineScrubFromVideo();
     if (video.currentTime > outSec - 0.04) {
       video.pause();
       video.currentTime = outSec;
     }
   });
+
+  video.addEventListener('seeked', () => {
+    updateFrameLabel();
+    syncTimelineScrubFromVideo();
+  });
+
+  timelineScrub.addEventListener('pointerdown', () => {
+    scrubbing = true;
+    video.pause();
+  });
+  timelineScrub.addEventListener('pointerup', () => {
+    scrubbing = false;
+  });
+  timelineScrub.addEventListener('pointercancel', () => {
+    scrubbing = false;
+  });
+  timelineScrub.addEventListener('change', () => {
+    const max = Number(timelineScrub.max) || 1;
+    const t = (Number(timelineScrub.value) / max) * durationSec;
+    video.currentTime = clamp(t, 0, durationSec);
+    curEl.textContent = formatTime(video.currentTime);
+    updateFrameLabel();
+  });
+  timelineScrub.addEventListener('input', () => {
+    const max = Number(timelineScrub.max) || 1;
+    const t = (Number(timelineScrub.value) / max) * durationSec;
+    video.currentTime = clamp(t, 0, durationSec);
+    curEl.textContent = formatTime(video.currentTime);
+    updateFrameLabel();
+  });
+
+  fpsStepInput.addEventListener('change', () => updateFrameLabel());
+
+  function stepFrame(dir) {
+    if (!durationSec) return;
+    video.pause();
+    const step = getStepSec();
+    const t = clamp(video.currentTime + dir * step, 0, durationSec);
+    video.currentTime = t;
+  }
+
+  btnFramePrev.addEventListener('click', () => stepFrame(-1));
+  btnFrameNext.addEventListener('click', () => stepFrame(1));
 
   ['input', 'change'].forEach((ev) => {
     inSlider.addEventListener(ev, () => {
@@ -206,6 +408,90 @@ function buildUI(root) {
     updateExportEnabled();
   });
 
+  async function openCameraPanel() {
+    cameraPanel.classList.remove('hidden');
+    try {
+      cameraStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+      cameraPreview.srcObject = cameraStream;
+      await cameraPreview.play();
+      btnRecStart.disabled = false;
+      setStatus('Camera ready. Start recording when you are.');
+    } catch (e) {
+      console.error(e);
+      setStatus(`Camera error: ${e instanceof Error ? e.message : String(e)}`);
+      closeCameraPanel();
+    }
+  }
+
+  function closeCameraPanel() {
+    cameraPanel.classList.add('hidden');
+    stopRecorderIfAny();
+    if (cameraStream) {
+      cameraStream.getTracks().forEach((t) => t.stop());
+      cameraStream = null;
+    }
+    cameraPreview.srcObject = null;
+    btnRecStart.disabled = true;
+    btnRecStop.disabled = true;
+  }
+
+  function stopRecorderIfAny() {
+    if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+      try {
+        mediaRecorder.stop();
+      } catch {
+        /* ignore */
+      }
+    }
+    mediaRecorder = null;
+  }
+
+  btnCameraToggle.addEventListener('click', () => {
+    if (cameraPanel.classList.contains('hidden')) openCameraPanel();
+    else closeCameraPanel();
+  });
+  btnCameraClose.addEventListener('click', () => closeCameraPanel());
+
+  btnRecStart.addEventListener('click', () => {
+    if (!cameraStream) return;
+    recordedChunks.length = 0;
+    const mime =
+      MediaRecorder.isTypeSupported('video/webm;codecs=vp9,opus') ? 'video/webm;codecs=vp9,opus'
+      : MediaRecorder.isTypeSupported('video/webm;codecs=vp8,opus') ? 'video/webm;codecs=vp8,opus'
+      : MediaRecorder.isTypeSupported('video/webm') ? 'video/webm'
+      : '';
+    try {
+      mediaRecorder = mime ? new MediaRecorder(cameraStream, { mimeType: mime }) : new MediaRecorder(cameraStream);
+    } catch (e) {
+      console.error(e);
+      setStatus(`Recorder error: ${e instanceof Error ? e.message : String(e)}`);
+      return;
+    }
+    const recMime = mediaRecorder.mimeType || 'video/webm';
+    mediaRecorder.ondataavailable = (ev) => {
+      if (ev.data.size > 0) recordedChunks.push(ev.data);
+    };
+    mediaRecorder.onstop = () => {
+      const blob = new Blob(recordedChunks, { type: recMime });
+      const name = `camera-${new Date().toISOString().replace(/[:.]/g, '-')}.webm`;
+      const file = new File([blob], name, { type: blob.type });
+      addClipFromFile(file);
+      setStatus(`Recording saved as "${name}".`);
+      btnRecStart.disabled = false;
+      btnRecStop.disabled = true;
+    };
+    mediaRecorder.start(200);
+    btnRecStart.disabled = true;
+    btnRecStop.disabled = false;
+    setStatus('Recording…');
+  });
+
+  btnRecStop.addEventListener('click', () => {
+    if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+      mediaRecorder.stop();
+    }
+  });
+
   btnLoadFfmpeg.addEventListener('click', async () => {
     btnLoadFfmpeg.disabled = true;
     ffmpegState.textContent = 'ffmpeg: loading…';
@@ -248,6 +534,8 @@ function buildUI(root) {
       updateExportEnabled();
     }
   });
+
+  updateClipsUI();
 }
 
 const app = $('#app');

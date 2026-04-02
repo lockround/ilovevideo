@@ -4,8 +4,9 @@ In-browser video editor using **ffmpeg.wasm** for encode/decode and standard bro
 
 ## Features (current)
 
-- Open a local video file
-- Preview with native controls
+- **Upload** one or more videos (multi-select); switch clips from the list
+- **Record** from webcam/mic (WebM via `MediaRecorder`); clip is added like an upload
+- **Timeline**: scrub the playhead; **Prev frame / Next frame** using a configurable **step FPS** (approximate frame stepping in the browser)
 - Trim with in/out sliders or “set in/out from playhead”
 - Export selection to **MP4** (stream copy when possible, otherwise H.264/AAC re-encode)
 
