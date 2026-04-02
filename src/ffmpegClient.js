@@ -40,14 +40,9 @@ export async function getFFmpeg() {
 export async function trimToMp4(file, startSec, endSec, onProgress) {
   const ffmpeg = await getFFmpeg();
   const ext = extFromName(file.name);
-  const inName = `input${ext}`;
-  const outName = 'output.mp4';
-
-  await ffmpeg.writeFile(inName, await fetchFile(file));
-
-  const safeStart = Math.max(0, startSec);
-  const safeEnd = Math.max(safeStart + 0.1, endSec);
-  const duration = safeEnd - safeStart;
+  const stamp = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  const inName = `in_${stamp}${ext}`;
+  const outName = `out_${stamp}.mp4`;
 
   /** @type {((e: { progress: number }) => void) | undefined} */
   let onProg;
@@ -58,58 +53,70 @@ export async function trimToMp4(file, startSec, endSec, onProgress) {
     ffmpeg.on('progress', onProg);
   }
 
-  const tryCopy = [
-    '-ss',
-    String(safeStart),
-    '-i',
-    inName,
-    '-t',
-    String(duration),
-    '-c',
-    'copy',
-    '-avoid_negative_ts',
-    'make_zero',
-    outName,
-  ];
-
-  const reencode = [
-    '-ss',
-    String(safeStart),
-    '-i',
-    inName,
-    '-t',
-    String(duration),
-    '-c:v',
-    'libx264',
-    '-preset',
-    'ultrafast',
-    '-crf',
-    '23',
-    '-c:a',
-    'aac',
-    '-b:a',
-    '128k',
-    '-movflags',
-    '+faststart',
-    outName,
-  ];
+  const cleanup = async () => {
+    if (onProg) ffmpeg.off('progress', onProg);
+    await ffmpeg.deleteFile(inName).catch(() => {});
+    await ffmpeg.deleteFile(outName).catch(() => {});
+  };
 
   try {
+    await ffmpeg.deleteFile(inName).catch(() => {});
+    await ffmpeg.deleteFile(outName).catch(() => {});
+    await ffmpeg.writeFile(inName, await fetchFile(file));
+
+    const safeStart = Math.max(0, startSec);
+    const safeEnd = Math.max(safeStart + 0.1, endSec);
+    const duration = safeEnd - safeStart;
+
+    const tryCopy = [
+      '-ss',
+      String(safeStart),
+      '-i',
+      inName,
+      '-t',
+      String(duration),
+      '-c',
+      'copy',
+      '-avoid_negative_ts',
+      'make_zero',
+      outName,
+    ];
+
+    const reencode = [
+      '-ss',
+      String(safeStart),
+      '-i',
+      inName,
+      '-t',
+      String(duration),
+      '-c:v',
+      'libx264',
+      '-preset',
+      'ultrafast',
+      '-crf',
+      '23',
+      '-c:a',
+      'aac',
+      '-b:a',
+      '128k',
+      '-movflags',
+      '+faststart',
+      outName,
+    ];
+
     try {
       await ffmpeg.exec(tryCopy);
     } catch {
       await ffmpeg.deleteFile(outName).catch(() => {});
       await ffmpeg.exec(reencode);
     }
+
+    const data = await ffmpeg.readFile(outName);
+    // Use the Uint8Array directly; `.buffer` can be oversized and corrupts the MP4 in some runtimes.
+    return new Blob([data], { type: 'video/mp4' });
   } finally {
-    if (onProg) ffmpeg.off('progress', onProg);
+    await cleanup();
   }
-
-  const data = await ffmpeg.readFile(outName);
-  await ffmpeg.deleteFile(inName).catch(() => {});
-  await ffmpeg.deleteFile(outName).catch(() => {});
-
-  return new Blob([data.buffer], { type: 'video/mp4' });
 }
 
 function extFromName(name) {
