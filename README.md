@@ -1,1 +1,47 @@
 # ilovevideo
+
+In-browser video editor using **ffmpeg.wasm** for encode/decode and standard browser APIs (`<video>`, File, Blob URLs) for playback and download.
+
+## Features (current)
+
+- Open a local video file
+- Preview with native controls
+- Trim with in/out sliders or “set in/out from playhead”
+- Export selection to **MP4** (stream copy when possible, otherwise H.264/AAC re-encode)
+
+## Run locally
+
+```bash
+npm install
+npm run dev
+```
+
+Open the URL printed by Vite (default `http://localhost:5173`). The dev server sets COOP/COEP headers so **SharedArrayBuffer** is available if you later switch to the multi-thread ffmpeg core.
+
+## Build
+
+```bash
+npm run build
+npm run preview
+```
+
+## Project layout
+
+```
+├── index.html
+├── package.json
+├── vite.config.js
+└── src/
+    ├── main.js          # UI and wiring
+    ├── ffmpegClient.js  # ffmpeg load + trim export
+    └── styles.css
+```
+
+First-time **Load ffmpeg** downloads the wasm core (~31 MB) from the CDN.
+
+## Next steps (ideas)
+
+- Timeline with waveform / thumbnails
+- Multiple clips or concat
+- Filters (scale, rotation) via ffmpeg filters
+- Undo stack for trim edits
